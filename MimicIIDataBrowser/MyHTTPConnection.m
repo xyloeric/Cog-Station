@@ -12,6 +12,7 @@
 
 #import "LabEvent.h"
 #import "MedEvent.h"
+#import "Patient.h"
 
 #import "JSON.h"
 
@@ -86,6 +87,21 @@ static const int ddLogLevel = LOG_LEVEL_VERBOSE;
             });
             
             return result;
+        }
+        else if ([[relativePath pathComponents] count] == 5) {
+            if ([[[relativePath pathComponents] objectAtIndex:4] isEqualToString:@"unit"]) {
+                NSString *term = [[relativePath pathComponents] objectAtIndex:3];
+                NSString *patientID = [[relativePath pathComponents] objectAtIndex:2];
+                HTTPDataResponse *result = [self getUnitForPatient:patientID andTerm:term];
+                dispatch_sync(dispatch_get_main_queue(), ^(void) {
+                    DDLogInfo(@"Client requested terms available for patient");
+                    DDLogInfo(@"%@", method);
+                });
+                
+                return result;
+            }
+            return nil;
+
         }
         else {
             return nil;
@@ -302,6 +318,9 @@ static const int ddLogLevel = LOG_LEVEL_VERBOSE;
             [convertedLabConcepts addObject:[self dictionaryFromLabConcept:lc]];
         }
         
+        [convertedLabConcepts sortUsingSelector:@selector(compare:)];
+        [convertedMedConcepts sortUsingSelector:@selector(compare:)];
+        
         NSDictionary *dict = [NSDictionary dictionaryWithObjectsAndKeys:convertedMedConcepts, @"meds", convertedLabConcepts, @"labs", nil];
         
         NSData *conceptListData = [[dict JSONRepresentation] dataUsingEncoding:NSUTF8StringEncoding];
@@ -377,6 +396,9 @@ static const int ddLogLevel = LOG_LEVEL_VERBOSE;
         
         if (labConcept != nil) {
             NSArray *labEvents = [labConcept.hasLabEvents allObjects];
+            predicate = [NSPredicate predicateWithFormat:@"chartTime >= %@ && chartTime <= %@", resultPatient.eventStart, resultPatient.eventEnd];
+            labEvents = [labEvents filteredArrayUsingPredicate:predicate];
+            
             NSSortDescriptor *sortDescriptor = [[NSSortDescriptor alloc] initWithKey:@"chartTime" ascending:TRUE];
             labEvents = [labEvents sortedArrayUsingDescriptors:[NSArray arrayWithObject:sortDescriptor]];
             [sortDescriptor release];
@@ -393,6 +415,9 @@ static const int ddLogLevel = LOG_LEVEL_VERBOSE;
         
         if (medConcept != nil) {
             NSArray *medEvents = [medConcept.hasMedEvents allObjects];
+            predicate = [NSPredicate predicateWithFormat:@"chartTime >= %@ && chartTime <= %@", resultPatient.eventStart, resultPatient.eventEnd];
+            medEvents = [medEvents filteredArrayUsingPredicate:predicate];
+            
             NSSortDescriptor *sortDescriptor = [[NSSortDescriptor alloc] initWithKey:@"chartTime" ascending:TRUE];
             medEvents = [medEvents sortedArrayUsingDescriptors:[NSArray arrayWithObject:sortDescriptor]];
             [sortDescriptor release];
@@ -411,27 +436,99 @@ static const int ddLogLevel = LOG_LEVEL_VERBOSE;
     return dataResponse;
 }
 
+- (HTTPDataResponse *)getUnitForPatient:(NSString *)_pid andTerm:(NSString *)mm2T
+{
+    HTTPDataResponse *dataResponse;
+    @autoreleasepool {
+        
+        NSEntityDescription *entityDescription = [NSEntityDescription entityForName:@"Patient" inManagedObjectContext:managedObjectContext];
+        NSFetchRequest *fetchRequest = [[[NSFetchRequest alloc] init] autorelease];
+        [fetchRequest setEntity:entityDescription];
+        
+        NSPredicate *predicate = [NSPredicate predicateWithFormat:@"patientID == %@", _pid];
+        [fetchRequest setPredicate:predicate];
+        
+        NSError *error;
+        NSArray *array = [managedObjectContext executeFetchRequest:fetchRequest error:&error];
+        
+        if ([array count] <= 0) {
+            NSString *errorString = [NSString stringWithFormat:@"Patient %@ does not exist", _pid];
+            NSData *errorData = [errorString dataUsingEncoding:NSUTF8StringEncoding];
+            return [[HTTPDataResponse alloc] initWithData:errorData];
+        }
+        Patient *resultPatient = [array objectAtIndex:0];
+        
+        NSArray *medConcepts = [resultPatient.medConcepts allObjects];
+        NSArray *labConcepts = [resultPatient.labConcepts allObjects];
+        
+        predicate = [NSPredicate predicateWithFormat:@"mimiciiTerm = %@", mm2T];
+        labConcepts = [labConcepts filteredArrayUsingPredicate:predicate];
+        
+        medConcepts = [medConcepts filteredArrayUsingPredicate:predicate];
+        
+        LabConcept *labConcept = nil;
+        MedConcept *medConcept = nil;
+        
+        
+        if ([labConcepts count] > 0) {
+            labConcept = [labConcepts objectAtIndex:0];
+        }
+        
+        if ([medConcepts count] > 0) {
+            medConcept = [medConcepts objectAtIndex:0];
+        }
+        
+        if (labConcept == nil && medConcept == nil) {
+            NSString *errorString = [NSString stringWithFormat:@"Concept %@ does not exist", mm2T];
+            NSData *errorData = [errorString dataUsingEncoding:NSUTF8StringEncoding];
+            return [[HTTPDataResponse alloc] initWithData:errorData]; 
+        }
+        
+        if (labConcept != nil) {
+            LabEvent *labEvent = [labConcept.hasLabEvents anyObject];
+                        
+            NSData *labEventsData = [labEvent.valueUnit dataUsingEncoding:NSUTF8StringEncoding];
+            
+            dataResponse = [[HTTPDataResponse alloc] initWithData:labEventsData];
+        }
+        
+        if (medConcept != nil) {
+            MedEvent *medEvent = [medConcept.hasMedEvents anyObject];
+                       
+            NSData *medEventsData = [medEvent.doseUnit dataUsingEncoding:NSUTF8StringEncoding];
+            
+            dataResponse = [[HTTPDataResponse alloc] initWithData:medEventsData];
+        }
+        
+    }
+    return dataResponse;
+}
+
 
 - (NSArray *)arrayFromLabEvent:(LabEvent *)le
 {
-    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
-    [dateFormatter setDateStyle:NSDateFormatterShortStyle];
-    [dateFormatter setTimeStyle:NSDateFormatterMediumStyle];
-    NSString *dateString = [dateFormatter stringFromDate:le.chartTime];
-    [dateFormatter release];
+//    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+//    [dateFormatter setDateFormat:@"yyyy-MM-dd'T'HH:mm:ss.SSSZZZ"];
+//    NSString *dateString = [dateFormatter stringFromDate:le.chartTime];
+//    [dateFormatter release];
     
-    return [NSArray arrayWithObjects:dateString, le.value, nil];
+    NSTimeInterval date = [le.chartTime timeIntervalSince1970] * 1000;
+    
+    return [NSArray arrayWithObjects:[NSNumber numberWithLong:date], [NSNumber numberWithFloat:[le.value floatValue]], nil];
 }
 
 - (NSArray *)arrayFromMedEvent:(MedEvent *)me
 {
-    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
-    [dateFormatter setDateStyle:NSDateFormatterShortStyle];
-    [dateFormatter setTimeStyle:NSDateFormatterMediumStyle];
-    NSString *dateString = [dateFormatter stringFromDate:me.chartTime];
-    [dateFormatter release];
+//    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+//    [dateFormatter setDateFormat:@"yyyy-MM-dd'T'HH:mm:ss.SSSZZZ"];
+//    NSString *dateString = [dateFormatter stringFromDate:me.chartTime];
+//    [dateFormatter release];
+//
+//    return [NSArray arrayWithObjects:dateString, me.dose, nil];
+    NSTimeInterval date = [me.chartTime timeIntervalSince1970] * 1000;
+    
+    return [NSArray arrayWithObjects:[NSNumber numberWithLong:date], [NSNumber numberWithFloat:[me.value floatValue]], nil];
 
-    return [NSArray arrayWithObjects:dateString, me.dose, nil];
 }
 
 @end
